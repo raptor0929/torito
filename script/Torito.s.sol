@@ -8,7 +8,7 @@ import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transpa
 contract ToritoScript is Script {
     Torito public toritoImplementation;
     TransparentUpgradeableProxy public toritoProxy;
-    
+
     // Deployment parameters - update these for your deployment
     address public aavePool = address(0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff); // Aave Pool for Arbitrum Sepolia
 
@@ -21,45 +21,37 @@ contract ToritoScript is Script {
 
         // Deploy the implementation contract
         toritoImplementation = new Torito();
-        
+
         // Encode the initialization data
-        bytes memory initData = abi.encodeWithSelector(
-            Torito.initialize.selector,
-            aavePool,
-            owner
-        );
-        
+        bytes memory initData = abi.encodeWithSelector(Torito.initialize.selector, aavePool, owner);
+
         // Deploy the transparent proxy
-        toritoProxy = new TransparentUpgradeableProxy(
-            address(toritoImplementation),
-            owner,
-            initData
-        );
+        toritoProxy = new TransparentUpgradeableProxy(address(toritoImplementation), owner, initData);
 
         Torito torito = Torito(address(toritoProxy));
 
         // Set up USD currency with its own oracle and risk parameters
         torito.setSupportedCurrency(
-            bytes32("USD"), 
-            1e18,           // Exchange rate (1:1)
-            5e16,           // 5% interest rate
+            bytes32("USD"),
+            1e18, // Exchange rate (1:1)
+            5e16, // 5% interest rate
             address(0x123), // USD oracle address (replace with actual)
-            150e16,         // 150% collateralization ratio
-            120e16          // 120% liquidation threshold
+            150e16, // 150% collateralization ratio
+            120e16 // 120% liquidation threshold
         );
-        
+
         // Set up BOB currency with different parameters
         torito.setSupportedCurrency(
-            bytes32("BOB"), 
+            bytes32("BOB"),
             76923076923076923, // Exchange rate (1:13)
-            10e16,              // 10% interest rate
-            address(0x456),     // BOB oracle address (replace with actual)
-            200e16,             // 200% collateralization ratio (higher risk)
-            150e16              // 150% liquidation threshold
+            10e16, // 10% interest rate
+            address(0x456), // BOB oracle address (replace with actual)
+            200e16, // 200% collateralization ratio (higher risk)
+            150e16 // 150% liquidation threshold
         );
 
         vm.stopBroadcast();
-        
+
         // Log deployment addresses
         console2.log("=== Torito Deployment ===");
         console2.log("Torito Implementation deployed at:", address(toritoImplementation));
