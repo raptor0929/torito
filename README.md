@@ -5,7 +5,7 @@ Torito is a decentralized lending protocol built on Ethereum that enables users 
 ## 🚀 Features
 
 ### Core Functionality
-- **Collateral Supply**: Users can supply supported tokens (USDT, USDC, etc.) to earn yield through Aave integration
+- **Collateral Supply**: Users can supply supported tokens (USDC, etc.) to earn yield through Aave integration
 - **Fiat Currency Borrowing**: Borrow multiple fiat currencies (USD, EUR, BOB, etc.) against supplied collateral
 - **Partial Repayments**: Flexible loan repayment system allowing users to repay loans in installments
 - **Per-Currency Configuration**: Each fiat currency has its own exchange rate, interest rate, and risk parameters
@@ -85,15 +85,15 @@ struct FiatCurrency {
 #### 1. Supply Collateral
 ```solidity
 // Approve tokens first
-usdt.approve(address(torito), amount);
+usdc.approve(address(torito), amount);
 // Supply tokens
-torito.supply(address(usdt), amount);
+torito.supply(address(usdc), amount);
 ```
 
 #### 2. Borrow Fiat Currency
 ```solidity
-// Borrow USD against USDT collateral
-torito.borrow(address(usdt), borrowAmount, bytes32("USD"));
+// Borrow USD against USDC collateral
+torito.borrow(address(usdc), borrowAmount, bytes32("USD"));
 ```
 
 #### 3. Repay Loan (Partial or Full)
@@ -107,7 +107,7 @@ torito.repayLoan(bytes32("USD"), fullAmount);
 #### 4. Withdraw Supply
 ```solidity
 // Withdraw available supply (respects LTV requirements)
-torito.withdrawSupply(address(usdt), amount);
+torito.withdrawSupply(address(usdc), amount);
 ```
 
 ### For Administrators

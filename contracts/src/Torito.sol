@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IPriceOracle} from "./PriceOracle.sol";
 
 interface IAavePool {
     function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode) external;
@@ -14,17 +11,7 @@ interface IAavePool {
     function getReserveNormalizedIncome(address asset) external view returns (uint256);
 }
 
-interface IPriceOracle {
-    function getPrice(address token) external view returns (uint256);
-    function getLatestRoundData()
-        external
-        view
-        returns (uint80 roundId, int256 price, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);
-}
-
-contract Torito is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable, PausableUpgradeable {
-    using SafeERC20 for IERC20;
-
+contract Torito is Ownable {
     // Enums
     enum SupplyStatus { ACTIVE, WITHDRAWN, LOCKED_IN_LOAN }
     enum BorrowStatus { PENDING, PROCESSED, CANCELED, REPAID, DEFAULTED, LIQUIDATED, MARGIN_CALL }
@@ -68,8 +55,7 @@ contract Torito is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable
 
         /// 🔑 Borrow index tracking
         uint256 borrowIndex; 
-        uint256 lastUpdate;  
-        uint256 R_entry;     
+        uint256 lastUpdateBorrowIndex;     
     }
 
     uint256 constant RAY = 1e27;
@@ -83,7 +69,6 @@ contract Torito is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable
     mapping(bytes32 => FiatCurrency) public supportedCurrencies; 
 
     IAavePool public aavePool;
-    mapping(address => address) public aTokens;
 
     // Events
     event SupplyUpdated(address indexed user, address token, uint256 amount, uint256 totalAmount);
@@ -96,12 +81,7 @@ contract Torito is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable
     event BorrowProcessed(address indexed user, bytes32 currency);
     event BorrowCanceled(address indexed user, bytes32 currency);
 
-    constructor() { _disableInitializers(); }
-
-    function initialize(address _aavePool, address _owner) public initializer {
-        __ReentrancyGuard_init();
-        __Ownable_init(_owner);
-        __Pausable_init();
+    constructor(address _aavePool, address _owner) Ownable(_owner) {
         aavePool = IAavePool(_aavePool);
     }
 
@@ -110,7 +90,7 @@ contract Torito is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable
         supportedTokens[token] = supported;
     }
 
-    function setSupportedCurrency(
+    function addSupportedCurrency(
         bytes32 currency,
         uint256 currencyExchangeRate,
         address oracle,
@@ -136,66 +116,54 @@ contract Torito is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable
             maxRate: maxRate,
             sensitivity: sensitivity,
             borrowIndex: RAY,        /// 🔑 start index
-            lastUpdate: block.timestamp,
-            R_entry: 0
+            lastUpdateBorrowIndex: block.timestamp
         });
     }
 
-    function updateTokenOracle(bytes32 currency, address oracle) external onlyOwner {
+    function updateCurrencyOracle(bytes32 currency, address oracle) external onlyOwner {
         supportedCurrencies[currency].oracle = oracle;
     }
 
-    function setAToken(address token, address aToken) external onlyOwner {
-        aTokens[token] = aToken;
+    modifier hasSupply(address user, address token) {
+        require(supplies[user][token].owner != address(0), "no supply");
+        _;
+    }
+
+    modifier hasBorrow(address user, bytes32 currency) {
+        require(borrows[user][currency].owner != address(0), "no borrow");
+        _;
     }
 
     // --- Interest model ---
-    /// 🔑 Compute dynamic rate for a currency
-    function getDynamicBorrowRate(bytes32 currency) public view returns (uint256) {
+    /// 🔑 Compute dynamic rate for a currency using linear interpolation
+    function getDynamicBorrowRate(bytes32 currency) public returns (uint256) {
         FiatCurrency storage fc = supportedCurrencies[currency];
         if (fc.oracle == address(0)) return fc.baseRate;
 
-        uint256 priceA = IPriceOracle(fc.oracle).getPrice(fc.currency); // note: adapt if using token pairs
-        uint256 priceB = 1e18; // fallback baseline (USD = 1)
+        uint256 bobPriceUSD = convertCurrencyToUSD(fc.currency, 1e18);
+        if (bobPriceUSD == 0) return fc.baseRate;
 
-        if (priceA == 0 || priceB == 0) return fc.baseRate;
-
-        uint256 R_now = (priceA * 1e18) / priceB;
-        if (fc.R_entry == 0) return fc.baseRate;
-
-        int256 delta = int256(R_now) - int256(fc.R_entry);
-        int256 rel = (delta * 1e18) / int256(fc.R_entry);
-        int256 rate = int256(fc.baseRate) + (rel * int256(fc.sensitivity) / 1e18);
-
-        if (rate < int256(fc.minRate)) rate = int256(fc.minRate);
-        if (rate > int256(fc.maxRate)) rate = int256(fc.maxRate);
-
-        return uint256(rate);
+        // Linear interpolation: when BOB down = rates down, BOB up = rates up
+        // We add to baseRate when BOB price increases
+        uint256 rate = fc.baseRate + ((bobPriceUSD - 1e18) * fc.sensitivity) / 1e18;
+        
+        return rate > fc.maxRate ? fc.maxRate : (rate < fc.minRate ? fc.minRate : rate);
     }
 
     /// 🔑 Update borrowIndex per currency
     function updateBorrowIndex(bytes32 currency) public {
         FiatCurrency storage fc = supportedCurrencies[currency];
-        uint256 elapsed = block.timestamp - fc.lastUpdate;
+        uint256 elapsed = block.timestamp - fc.lastUpdateBorrowIndex;
         if (elapsed == 0) return;
 
         uint256 currentRate = getDynamicBorrowRate(currency);
 
         fc.borrowIndex = (fc.borrowIndex * (RAY + (currentRate * elapsed) / 365 days)) / RAY;
-        fc.lastUpdate = block.timestamp;
-
-        // update ratio snapshot
-        if (fc.oracle != address(0)) {
-            uint256 priceA = IPriceOracle(fc.oracle).getPrice(fc.currency);
-            uint256 priceB = 1e18;
-            if (priceA > 0 && priceB > 0) {
-                fc.R_entry = (priceA * 1e18) / priceB;
-            }
-        }
+        fc.lastUpdateBorrowIndex = block.timestamp;
     }
 
     // --- Supply ---
-    function supply(address token, uint256 amount) external nonReentrant whenNotPaused {
+    function supply(address token, uint256 amount) external {
         require(supportedTokens[token], "Token not supported");
         require(amount > 0, "Amount > 0");
 
@@ -222,7 +190,7 @@ contract Torito is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable
 
     // --- Borrow ---
     function borrow(address collateralToken, uint256 borrowAmount, bytes32 fiatCurrency)
-        external nonReentrant whenNotPaused hasSupply(collateralToken)
+        external hasSupply(msg.sender, collateralToken)
     {
         require(supportedCurrencies[fiatCurrency].currency != bytes32(0), "Currency not supported");
         updateBorrowIndex(fiatCurrency);  /// 🔑 sync interest
@@ -230,8 +198,12 @@ contract Torito is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable
         Supply storage userSupply = supplies[msg.sender][collateralToken];
         require(userSupply.status == SupplyStatus.ACTIVE, "supply not active");
 
-        uint256 requiredCollateralUSD = (borrowAmount * supportedCurrencies[fiatCurrency].collateralizationRatio) / 1e18;
-        uint256 collateralValueUSD = getTokenValueUSD(collateralToken, userSupply.scaledBalance, fiatCurrency);
+        // Convert borrow amount from BOB to USD
+        uint256 borrowValueUSD = convertCurrencyToUSD(fiatCurrency, borrowAmount);
+        uint256 requiredCollateralUSD = (borrowValueUSD * supportedCurrencies[fiatCurrency].collateralizationRatio) / 1e18;
+        
+        // USDC collateral value in USD (USDC = USD, 1:1)
+        uint256 collateralValueUSD = userSupply.scaledBalance;
         require(collateralValueUSD >= requiredCollateralUSD, "insufficient collateral");
 
         Borrow storage userBorrow = borrows[msg.sender][fiatCurrency];
@@ -266,7 +238,7 @@ contract Torito is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable
     }
 
     // --- Repay ---
-    function repayLoan(bytes32 currency, uint256 repaymentAmount) external nonReentrant hasBorrow(currency) {
+    function repayLoan(bytes32 currency, uint256 repaymentAmount) external hasBorrow(msg.sender, currency) {
         updateBorrowIndex(currency);  /// 🔑 sync
 
         Borrow storage loan = borrows[msg.sender][currency];
@@ -290,18 +262,21 @@ contract Torito is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable
     }
 
     // --- Liquidation (unchanged except index sync can be added) ---
-    function liquidate(address user, bytes32 currency) external nonReentrant {
+    function liquidate(address user, bytes32 currency) external {
         Borrow storage loan = borrows[user][currency];
         require(loan.owner != address(0), "no borrow");
         require(loan.status == BorrowStatus.PROCESSED, "not processed");
 
-        uint256 collateralValueUSD = getTokenValueUSD(loan.collateralToken, loan.collateralAmount, loan.fiatCurrency);
-        uint256 currencyExchangeRate = supportedCurrencies[loan.fiatCurrency].currencyExchangeRate;
+        // USDC collateral value in USD (USDC = USD, 1:1)
+        uint256 collateralValueUSD = loan.collateralAmount;
+
         uint256 threshold = supportedCurrencies[loan.fiatCurrency].liquidationThreshold;
 
         uint256 outstanding = (loan.borrowedAmount * supportedCurrencies[currency].borrowIndex) / RAY
             + loan.interestAccrued - loan.totalRepaid;
-        uint256 debtValueUSD = outstanding * currencyExchangeRate / 1e18;
+        
+        // Convert outstanding BOB debt to USD
+        uint256 debtValueUSD = convertCurrencyToUSD(currency, outstanding);
         uint256 ratio = (collateralValueUSD * 1e18) / debtValueUSD;
 
         require(ratio < threshold, "not liquidatable");
@@ -310,12 +285,18 @@ contract Torito is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable
         emit CollateralLiquidated(user, loan.collateralAmount);
     }
 
-    // --- Views ---
-    function getTokenValueUSD(address token, uint256 amount, bytes32 currency) public view returns (uint256) {
-        address oracle = supportedCurrencies[currency].oracle;
-        require(oracle != address(0), "no oracle");
-        uint256 price = IPriceOracle(oracle).getPrice(token);
+    // Convert FROM currency TO USD
+    function convertCurrencyToUSD(bytes32 currency, uint256 amount) public returns (uint256) {
+        supportedCurrencies[currency].currencyExchangeRate = IPriceOracle(supportedCurrencies[currency].oracle).getPrice(currency);
+        uint256 price = supportedCurrencies[currency].currencyExchangeRate;
         return (amount * price) / 1e18;
+    }
+
+    // Convert FROM USD TO currency
+    function convertUSDToCurrency(bytes32 currency, uint256 usdAmount) public returns (uint256) {
+        supportedCurrencies[currency].currencyExchangeRate = IPriceOracle(supportedCurrencies[currency].oracle).getPrice(currency);
+        uint256 price = supportedCurrencies[currency].currencyExchangeRate;
+        return (usdAmount * 1e18) / price;
     }
 
     function getBorrow(address user, bytes32 currency) external view returns (Borrow memory) {

@@ -1,0 +1,28 @@
+{
+  "name": "torito-oracle-script",
+  "version": "1.0.0",
+  "description": "TypeScript script to update Torito oracle with P2P price data",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "schedule": "node dist/scheduler.js",
+    "test": "ts-node src/test.ts"
+  },
+  "dependencies": {
+    "ethers": "^6.8.1",
+    "node-cron": "^3.0.3",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.8.0",
+    "@types/node-cron": "^3.0.11",
+    "typescript": "^5.2.2",
+    "ts-node": "^10.9.1"
+  },
+  "keywords": ["ethereum", "oracle", "price-feed", "defi"],
+  "author": "Torito Team",
+  "license": "MIT"
+}
