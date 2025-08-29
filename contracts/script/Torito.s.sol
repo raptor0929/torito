@@ -25,7 +25,6 @@ contract ToritoScript is Script {
         // Set up BOB currency with different parameters
         torito.addSupportedCurrency(
             bytes32("BOB"),
-            12580000000000000000, // 12.58 per USD
             oracle, // BOB oracle address (replace with actual)
             200e16, // 200% collateralization ratio (higher risk)
             150e16, // 150% liquidation threshold
@@ -37,7 +36,7 @@ contract ToritoScript is Script {
 
         vm.stopBroadcast();
 
-        (,,uint256 collateralizationRatio, uint256 liquidationThreshold, address oracle2, uint256 baseRate, uint256 minRate, uint256 maxRate, uint256 sensitivity,,) = torito.supportedCurrencies(bytes32("BOB"));
+        (,uint256 collateralizationRatio, uint256 liquidationThreshold, address oracle2, uint256 baseRate, uint256 minRate, uint256 maxRate, uint256 sensitivity,,) = torito.supportedCurrencies(bytes32("BOB"));
         // Log deployment addresses
         console.log("=== Torito Deployment ===");
         console.log("Torito deployed at:", address(torito));
