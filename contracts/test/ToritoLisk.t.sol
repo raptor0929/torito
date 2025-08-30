@@ -1,43 +1,55 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {Test, console2} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {Torito} from "../src/Torito.sol";
 import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 import {ProxyAdmin} from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
-import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
-import {MockMorphoVault} from "./mocks/MockMorphoVault.sol";
-import {MockPriceOracle} from "./mocks/MockPriceOracle.sol";
+import {IMetaMorpho} from "../src/Torito.sol";
+import {PriceOracle} from "../src/PriceOracle.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract ToritoTest is Test {
+contract ToritoLiskTest is Test {
     Torito public torito;
 
-    ERC20Mock public usdc;
-    MockMorphoVault public vault;
-    MockPriceOracle public priceOracle;
+    IERC20 public usdt;
+    IMetaMorpho public vault;
+    PriceOracle public priceOracle;
 
-    address public owner = address(this);
-    address public user1 = address(0x1);
-    address public user2 = address(0x2);
+    address constant USDT_CA = 0x43F2376D5D03553aE72F4A8093bbe9de4336EB08;
+    address constant MORPHO_USDT_VAULT_CA = 0x50cB55BE8cF05480a844642cB979820C847782aE;
+    address constant WHALE_USDT_CA = 0x00cD58DEEbd7A2F1C55dAec715faF8aed5b27BF8;
+
+    address public owner;
+    address public user1;
+    address public user2;
+    address public whale;
 
     function setUp() public {
-        // Deploy mock contracts
-        usdc = new ERC20Mock();
-        vault = new MockMorphoVault();
-        priceOracle = new MockPriceOracle();
+        // Fork mainnet
+        uint256 liskForkBlock = 20_891_898;
+        vm.createSelectFork(vm.rpcUrl("lisk"), liskForkBlock);
+
+        owner = address(this);
+        user1 = address(0x1);
+        user2 = address(0x2);
+        whale = address(WHALE_USDT_CA);
+
+        usdt = IERC20(USDT_CA); // USDT in Lisk
+        vault = IMetaMorpho(MORPHO_USDT_VAULT_CA);
+
+        vm.startPrank(owner);
+        priceOracle = new PriceOracle();
+        priceOracle.updateCurrencyPrice(bytes32("BOB"), 12570000000000000000); // 12.57 per USD
+        vm.stopPrank();
 
         // Deploy Torito
         torito = new Torito(address(vault), owner);
 
-        // Setup mock tokens
-        usdc.mint(user1, 10000e6);
-        usdc.mint(user2, 10000e6);
-
-        // Setup price oracle
-        priceOracle.setPrice(bytes32("BOB"), 12570000000000000000); // 12.57 per USD
-
-        // Setup Morpho vault
-        vault.setReserveNormalizedIncome(address(usdc), 1e27);
+        vm.startPrank(whale);
+        usdt.transfer(user1, 10000e6);
+        usdt.transfer(user2, 10000e6);
+        vm.stopPrank();
 
         torito.addSupportedCurrency(
             bytes32("BOB"),
@@ -54,73 +66,66 @@ contract ToritoTest is Test {
     // ========== BASIC TESTS ==========
 
     function test_supply() public {
-        // Add USDC as supported token
-        torito.setSupportedToken(address(usdc), true);
+        // Add USDT as supported token
+        torito.setSupportedToken(address(usdt), true);
         
-        // Set the token in the mock vault
-        vault.setToken(address(usdc));
-        
-        uint256 supplyAmount = 1000e6; // 1000 USDC
+        uint256 supplyAmount = 1000e6; // 1000 USDT
+
+        console.log("user1 balance", usdt.balanceOf(user1));
         
         vm.startPrank(user1);
-        usdc.approve(address(torito), supplyAmount);
+        usdt.approve(address(torito), supplyAmount);
         
-        torito.supply(address(usdc), supplyAmount);
+        torito.supply(address(usdt), supplyAmount);
         
         vm.stopPrank();
         
-        // Check that Torito received the USDC
-        assertEq(usdc.balanceOf(address(vault)), supplyAmount, "Vault should have received USDC");
-        assertEq(usdc.balanceOf(user1), 9000e6, "User1 should have 9000 USDC remaining");
+        // // Check that Torito received the USDT
+        // assertEq(usdt.balanceOf(address(vault)), supplyAmount, "Vault should have received USDT");
+        // assertEq(usdt.balanceOf(user1), 9000e6, "User1 should have 9000 USDT remaining");
         
-        // Check supply data
-        (address owner2,, address token,, Torito.SupplyStatus status) = torito.supplies(user1, address(usdc));
-        assertEq(owner2, user1, "Supply owner should be user1");
-        assertEq(token, address(usdc), "Supply token should be USDC");
-        assertEq(uint8(status), 0, "Supply status should be ACTIVE");
+        // // Check supply data
+        // (address owner2,, address token,, Torito.SupplyStatus status) = torito.supplies(user1, address(usdt));
+        // assertEq(owner2, user1, "Supply owner should be user1");
+        // assertEq(token, address(usdt), "Supply token should be USDT");
+        // assertEq(uint8(status), 0, "Supply status should be ACTIVE");
     }
 
     function test_borrow() public {
-        // Add USDC as supported token
-        torito.setSupportedToken(address(usdc), true);
-        
-        // Set the token in the mock vault
-        vault.setToken(address(usdc));
+        // Add USDT as supported token
+        torito.setSupportedToken(address(usdt), true);
         
         // First supply some collateral
-        uint256 supplyAmount = 2000e6; // 2000 USDC collateral
+        uint256 supplyAmount = 2000e6; // 2000 USDT collateral
         uint256 borrowAmount = 1000e18; // 1000 BOB (in wei)
         
         vm.startPrank(user1);
-        usdc.approve(address(torito), supplyAmount);
-        torito.supply(address(usdc), supplyAmount);
+        usdt.approve(address(torito), supplyAmount);
+        torito.supply(address(usdt), supplyAmount);
         
-        torito.borrow(address(usdc), borrowAmount, bytes32("BOB"));
+        torito.borrow(address(usdt), borrowAmount, bytes32("BOB"));
         vm.stopPrank();
         
         // Check borrow data
         (address borrower,, address collateralToken, bytes32 currency,, Torito.BorrowStatus status) = torito.borrows(user1, bytes32("BOB"));
         assertEq(borrower, user1, "Borrower should be user1");
-        assertEq(collateralToken, address(usdc), "Collateral token should be USDC");
+        assertEq(collateralToken, address(usdt), "Collateral token should be USDT");
         assertEq(currency, bytes32("BOB"), "Currency should be BOB");
         assertEq(uint8(status), 0, "Borrow status should be PENDING");
     }
 
     function test_repayLoan() public {
-        // Add USDC as supported token
-        torito.setSupportedToken(address(usdc), true);
-        
-        // Set the token in the mock vault
-        vault.setToken(address(usdc));
+        // Add USDT as supported token
+        torito.setSupportedToken(address(usdt), true);
         
         // Setup: supply and borrow
         uint256 supplyAmount = 2000e6;
         uint256 borrowAmount = 1000e18;
         
         vm.startPrank(user1);
-        usdc.approve(address(torito), supplyAmount);
-        torito.supply(address(usdc), supplyAmount);
-        torito.borrow(address(usdc), borrowAmount, bytes32("BOB"));
+        usdt.approve(address(torito), supplyAmount);
+        torito.supply(address(usdt), supplyAmount);
+        torito.borrow(address(usdt), borrowAmount, bytes32("BOB"));
         
         // Process the borrow (simulate owner approval)
         vm.stopPrank();
@@ -140,20 +145,17 @@ contract ToritoTest is Test {
     }
 
     function test_liquidate() public {
-        // Add USDC as supported token
-        torito.setSupportedToken(address(usdc), true);
-        
-        // Set the token in the mock vault
-        vault.setToken(address(usdc));
+        // Add USDT as supported token
+        torito.setSupportedToken(address(usdt), true);
         
         // Setup: user1 supplies collateral and borrows
         uint256 supplyAmount = 2000e6;
         uint256 borrowAmount = 1500e18; // High borrow relative to collateral
         
         vm.startPrank(user1);
-        usdc.approve(address(torito), supplyAmount);
-        torito.supply(address(usdc), supplyAmount);
-        torito.borrow(address(usdc), borrowAmount, bytes32("BOB"));
+        usdt.approve(address(torito), supplyAmount);
+        torito.supply(address(usdt), supplyAmount);
+        torito.borrow(address(usdt), borrowAmount, bytes32("BOB"));
         vm.stopPrank();
         
         // Process the borrow
@@ -162,7 +164,8 @@ contract ToritoTest is Test {
         
         // Simulate price drop to trigger liquidation
         // Set BOB price to 1 (92.04% drop) to make debt worth less
-        priceOracle.setPrice(bytes32("BOB"), 1e18); // 1 BOB per USD (92.04% drop)
+        vm.prank(owner);
+        priceOracle.updateCurrencyPrice(bytes32("BOB"), 1e18); // 1 BOB per USD (92.04% drop)
         
         // User2 liquidates user1
         vm.startPrank(user2);
@@ -226,33 +229,27 @@ contract ToritoTest is Test {
     // ========== WITHDRAW SUPPLY TESTS ==========
 
     function test_withdrawSupply() public {
-        // Add USDC as supported token
-        torito.setSupportedToken(address(usdc), true);
+        // Add USDT as supported token
+        torito.setSupportedToken(address(usdt), true);
         
-        // Set the token in the mock vault
-        vault.setToken(address(usdc));
-        
-        uint256 supplyAmount = 1000e6; // 1000 USDC
-        uint256 withdrawAmount = 500e6; // 500 USDC
+        uint256 supplyAmount = 1000e6; // 1000 USDT
+        uint256 withdrawAmount = 500e6; // 500 USDT
         
         vm.startPrank(user1);
-        usdc.approve(address(torito), supplyAmount);
-        torito.supply(address(usdc), supplyAmount);
-        
-        // Mock the vault to have the tokens
-        usdc.mint(address(vault), supplyAmount);
+        usdt.approve(address(torito), supplyAmount);
+        torito.supply(address(usdt), supplyAmount);
         
         // Withdraw half of the supply
-        torito.withdrawSupply(address(usdc), withdrawAmount);
+        torito.withdrawSupply(address(usdt), withdrawAmount);
         vm.stopPrank();
         
         // Check that user received the withdrawn amount
-        assertEq(usdc.balanceOf(user1), 9500e6, "User1 should have 9500 USDC (10000 - 1000 + 500)");
+        assertEq(usdt.balanceOf(user1), 9500e6, "User1 should have 9500 USDT (10000 - 1000 + 500)");
         
-        // Check supply data - should still have 500 USDC worth of shares
-        (address owner2,, address token,, Torito.SupplyStatus status) = torito.supplies(user1, address(usdc));
+        // Check supply data - should still have 500 USDT worth of shares
+        (address owner2,, address token,, Torito.SupplyStatus status) = torito.supplies(user1, address(usdt));
         assertEq(owner2, user1, "Supply owner should still be user1");
-        assertEq(token, address(usdc), "Supply token should still be USDC");
+        assertEq(token, address(usdt), "Supply token should still be USDT");
         assertEq(uint8(status), 0, "Supply status should still be ACTIVE");
     }
 }

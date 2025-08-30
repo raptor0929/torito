@@ -4,24 +4,28 @@ pragma solidity 0.8.30;
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IPriceOracle} from "./PriceOracle.sol";
-import {console} from "forge-std/Test.sol";
+import {console} from "forge-std/console.sol";
 
-interface IAavePool {
-    function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode) external;
-    function withdraw(address asset, uint256 amount, address to) external returns (uint256);
-    function getReserveNormalizedIncome(address asset) external view returns (uint256);
+// Morpho vault interface
+interface IMetaMorpho {
+    function deposit(uint256 assets, address receiver) external returns (uint256 shares);
+    function redeem(uint256 shares, address receiver, address owner) external returns (uint256 assets);
+    function previewRedeem(uint256 shares) external view returns (uint256 assets);
+    function withdraw(uint256 assets, address receiver, address owner) external returns (uint256 shares);
+    function previewWithdraw(uint256 assets) external view returns (uint256 shares);
 }
 
 contract Torito is Ownable {
     // Enums
-    enum SupplyStatus { ACTIVE, LOCKED_IN_LOAN }
+    enum SupplyStatus { ACTIVE, INACTIVE, LOCKED_IN_LOAN }
     enum BorrowStatus { PENDING, PROCESSED, CANCELED, REPAID, LIQUIDATED }
 
     // Structs
     struct Supply {
         address owner;
-        uint256 scaledBalance;
+        uint256 shares;
         address token;
+        bytes32 borrowFiatCurrency;
         SupplyStatus status;
     }
 
@@ -59,7 +63,7 @@ contract Torito is Ownable {
     mapping(address => bool) public supportedTokens; 
     mapping(bytes32 => FiatCurrency) public supportedCurrencies;
 
-    IAavePool public aavePool;
+    IMetaMorpho public vault;
 
     // Events
     event SupplyUpdated(address indexed user, address token, uint256 amount, uint256 totalAmount);
@@ -69,13 +73,14 @@ contract Torito is Ownable {
     event BorrowProcessed(address indexed user, bytes32 currency);
     event BorrowCanceled(address indexed user, bytes32 currency);
 
-    constructor(address _aavePool, address _owner) Ownable(_owner) {
-        aavePool = IAavePool(_aavePool);
+    constructor(address _vault, address _owner) Ownable(_owner) {
+        vault = IMetaMorpho(_vault);
     }
 
     // --- Admin ---
     function setSupportedToken(address token, bool supported) external onlyOwner {
         supportedTokens[token] = supported;
+        IERC20(token).approve(address(vault), type(uint256).max);
     }
 
     function addSupportedCurrency(
@@ -154,21 +159,65 @@ contract Torito is Ownable {
         require(amount > 0, "Amount > 0");
 
         IERC20(token).transferFrom(msg.sender, address(this), amount);
-        uint256 currentIndex = aavePool.getReserveNormalizedIncome(token);
+        console.log("torito balance", IERC20(token).balanceOf(address(this)));
 
-        IERC20(token).approve(address(aavePool), amount);
-        aavePool.supply(token, amount, address(this), 0);
+        // Ensure vault has approval to spend Torito's tokens
+        IERC20(token).approve(address(vault), amount);
+
+        uint256 shares = vault.deposit(amount, address(this));
+        console.log("shares", shares);
+        console.log("amount", amount);
 
         Supply storage userSupply = supplies[msg.sender][token];
         if (userSupply.owner == address(0)) {
             userSupply.owner = msg.sender;
             userSupply.token = token;
             userSupply.status = SupplyStatus.ACTIVE;
-            userSupply.scaledBalance += (amount * RAY) / currentIndex;
+            userSupply.shares = shares;
         } else {
-            userSupply.scaledBalance += (amount * RAY) / currentIndex;
+            userSupply.shares += shares;
         }
-        emit SupplyUpdated(msg.sender, token, amount, userSupply.scaledBalance);
+        emit SupplyUpdated(msg.sender, token, amount, userSupply.shares);
+    }
+
+    function withdrawSupply(address token, uint256 assetsToWithdraw) external hasSupply(msg.sender, token) {
+        Supply storage userSupply = supplies[msg.sender][token];
+        require(vault.previewWithdraw(assetsToWithdraw) <= userSupply.shares, "Insufficient shares");
+        require(assetsToWithdraw > 0, "Amount > 0");
+
+        // Check if supply is locked in a loan
+        if (userSupply.status == SupplyStatus.LOCKED_IN_LOAN) {
+            Borrow storage loan = borrows[msg.sender][userSupply.borrowFiatCurrency];
+
+            // Calculate health factor before withdrawal
+            uint256 currentCollateralValueUSD = vault.previewRedeem(userSupply.shares);
+            uint256 outstandingDebt = (loan.borrowedAmount * 
+                supportedCurrencies[loan.fiatCurrency].borrowIndex) / RAY - 
+                loan.totalRepaid;
+            uint256 debtValueUSD = convertCurrencyToUSD(loan.fiatCurrency, outstandingDebt);
+    
+            // Calculate health factor after withdrawal
+            uint256 newCollateralValueUSD = currentCollateralValueUSD - assetsToWithdraw;
+            // health factor = collateral / debt
+            uint256 healthFactor = (newCollateralValueUSD * 1e18) / debtValueUSD;
+
+            require(healthFactor > 1e18, "Health factor must be > 1 after withdrawal");
+        }
+
+        // Withdraw from vault
+        uint256 sharesBurned = vault.withdraw(assetsToWithdraw, msg.sender, address(this));
+        
+        // Update user supply
+        userSupply.shares -= sharesBurned;
+        
+        // If no shares left, reset the supply
+        if (userSupply.shares == 0) {
+            userSupply.owner = address(0);
+            userSupply.token = address(0);
+            userSupply.status = SupplyStatus.ACTIVE;
+        }
+
+        emit SupplyUpdated(msg.sender, token, assetsToWithdraw, userSupply.shares);
     }
 
     // --- Borrow ---
@@ -185,13 +234,9 @@ contract Torito is Ownable {
         uint256 borrowValueUSD = convertCurrencyToUSD(fiatCurrency, borrowAmount);
         uint256 requiredCollateralUSD = (borrowValueUSD * supportedCurrencies[fiatCurrency].collateralizationRatio) / 1e18;
 
-        console.log("borrowValueUSD", borrowValueUSD);
-        console.log("collateralizationRatio", supportedCurrencies[fiatCurrency].collateralizationRatio);
         // USDC collateral value in USD (USDC = USD, 1:1)
-        uint256 collateralValueUSD = userSupply.scaledBalance;
-        console.log("collateralValueUSD", collateralValueUSD);
-        console.log("requiredCollateralUSD", requiredCollateralUSD);
-        require(collateralValueUSD >= requiredCollateralUSD, "insufficient collateral");
+        uint256 currentCollateralValueUSD = vault.previewRedeem(userSupply.shares);
+        require(currentCollateralValueUSD >= requiredCollateralUSD, "insufficient collateral");
 
         Borrow storage userBorrow = borrows[msg.sender][fiatCurrency];
         if (userBorrow.owner == address(0)) {
@@ -249,7 +294,7 @@ contract Torito is Ownable {
 
         // Get current USDC collateral value from user's scaled balance
         Supply storage userSupply = supplies[user][loan.collateralToken];
-        uint256 collateralValueUSD = userSupply.scaledBalance; // USDC = USD, 1:1
+        uint256 collateralValueUSD = vault.previewRedeem(userSupply.shares);
 
         uint256 threshold = supportedCurrencies[loan.fiatCurrency].liquidationThreshold;
 
@@ -263,7 +308,7 @@ contract Torito is Ownable {
         require(ratio < threshold, "not liquidatable");
 
         loan.status = BorrowStatus.LIQUIDATED;
-        emit CollateralLiquidated(user, userSupply.scaledBalance);
+        emit CollateralLiquidated(user, userSupply.shares);
     }
 
     // Convert FROM currency TO USD (returns in 6 decimals for USDC compatibility)
