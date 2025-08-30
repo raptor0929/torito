@@ -17,7 +17,7 @@ contract ToritoScript is Script {
     function run(address oracle) public {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address owner = vm.addr(deployerPrivateKey);
-        vm.startBroadcast(owner);
+        vm.startBroadcast(deployerPrivateKey);
 
         // Deploy the implementation contract
         torito = new Torito(morphoVault, owner);
