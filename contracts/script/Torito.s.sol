@@ -9,8 +9,8 @@ import {Torito} from "../src/Torito.sol";
 contract ToritoScript is Script {
     Torito public torito;
 
-    // Deployment parameters - update these for your deployment
-    address public aavePool = address(0x07eA79F68B2B3df564D0A34F8e19D9B1e339814b); // Aave Pool for Base Sepolia
+    address public morphoVault = address(0x50cB55BE8cF05480a844642cB979820C847782aE); // Morpho USDT Vault
+    address public usdt = address(0x43F2376D5D03553aE72F4A8093bbe9de4336EB08);
 
     function setUp() public {}
 
@@ -20,7 +20,7 @@ contract ToritoScript is Script {
         vm.startBroadcast();
 
         // Deploy the implementation contract
-        torito = new Torito(aavePool, owner);
+        torito = new Torito(morphoVault, owner);
 
         // Set up BOB currency with different parameters
         torito.addSupportedCurrency(
@@ -34,6 +34,8 @@ contract ToritoScript is Script {
             25e16 // 25% sensitivity
         );
 
+        torito.setSupportedToken(address(usdt), true);
+
         vm.stopBroadcast();
 
         (,uint256 collateralizationRatio, uint256 liquidationThreshold, address oracle2, uint256 baseRate, uint256 minRate, uint256 maxRate, uint256 sensitivity,,) = torito.supportedCurrencies(bytes32("BOB"));
@@ -41,7 +43,7 @@ contract ToritoScript is Script {
         console.log("=== Torito Deployment ===");
         console.log("Torito deployed at:", address(torito));
         console.log("Owner set to:", owner);
-        console.log("Aave Pool:", aavePool);
+        console.log("Morpho USDT Vault:", morphoVault);
         console.log("BOB Collateralization Ratio:", collateralizationRatio / 1e16);
         console.log("BOB Liquidation Threshold:", liquidationThreshold / 1e16);
         console.log("BOB Oracle:", address(oracle2));
