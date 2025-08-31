@@ -96,8 +96,8 @@ contract ToritoLiskTest is Test {
         torito.setSupportedToken(address(usdt), true);
         
         // First supply some collateral
-        uint256 supplyAmount = 2000e6; // 2000 USDT collateral
-        uint256 borrowAmount = 1000e18; // 1000 BOB (in wei)
+        uint256 supplyAmount = 1e5; // 2000 USDT collateral
+        uint256 borrowAmount = 1e16; // 1000 BOB (in wei)
         
         vm.startPrank(user1);
         usdt.approve(address(torito), supplyAmount);

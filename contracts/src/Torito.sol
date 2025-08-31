@@ -16,6 +16,7 @@ interface IMetaMorpho {
 }
 
 contract Torito is Ownable {
+    
     // Enums
     enum SupplyStatus { ACTIVE, INACTIVE, LOCKED_IN_LOAN }
     enum BorrowStatus { PENDING, PROCESSED, CANCELED, REPAID, LIQUIDATED }
@@ -136,7 +137,15 @@ contract Torito is Ownable {
 
         // Linear interpolation: when BOB down = rates down, BOB up = rates up
         // We add to baseRate when BOB price increases
-        uint256 rate = fc.baseRate + ((bobPriceUSD - 1e18) * fc.sensitivity) / 1e18;
+        uint256 rate;
+        if (bobPriceUSD >= 1e18) {
+            // BOB price is above $1, increase rate
+            rate = fc.baseRate + ((bobPriceUSD - 1e18) * fc.sensitivity) / 1e18;
+        } else {
+            // BOB price is below $1, decrease rate (but don't go below minRate)
+            uint256 decrease = ((1e18 - bobPriceUSD) * fc.sensitivity) / 1e18;
+            rate = fc.baseRate > decrease ? fc.baseRate - decrease : fc.minRate;
+        }
         
         return rate > fc.maxRate ? fc.maxRate : (rate < fc.minRate ? fc.minRate : rate);
     }
@@ -314,7 +323,7 @@ contract Torito is Ownable {
     // Convert FROM currency TO USD (returns in 6 decimals for USDC compatibility)
     function convertCurrencyToUSD(bytes32 currency, uint256 amount) public view returns (uint256) {
         uint256 price = IPriceOracle(supportedCurrencies[currency].oracle).getPrice(currency);
-        return (amount * 1e18) / price / 1e12;
+        return (amount * 1e6) / price;
     }
 
     // Convert FROM USD TO currency
